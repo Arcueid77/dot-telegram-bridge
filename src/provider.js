@@ -8,6 +8,16 @@ function failure(fatal = false) {
   return Object.assign(new Error('Telegram request failed.'), {fatal});
 }
 
+function optionalMetadata(value, limit) {
+  if (typeof value !== 'string' || !value.length || /\p{Surrogate}|[\u0000-\u001f\u007f]/u.test(value)) return undefined;
+  let result = '';
+  for (const character of value) {
+    if (result.length + character.length > limit) break;
+    result += character;
+  }
+  return result || undefined;
+}
+
 async function readJson(response) {
   if (!response.body || response.redirected) throw failure();
   const reader = response.body.getReader();
@@ -34,8 +44,10 @@ function metadata(message) {
     const value = message[field];
     if (!value || typeof value !== 'object') continue;
     const item = {kind};
-    if (typeof value.file_name === 'string') item.name = value.file_name.slice(0, 255);
-    if (typeof value.mime_type === 'string') item.mimeType = value.mime_type.slice(0, 127);
+    const name = optionalMetadata(value.file_name, 255);
+    const mimeType = optionalMetadata(value.mime_type, 127);
+    if (name !== undefined) item.name = name;
+    if (mimeType !== undefined) item.mimeType = mimeType;
     result.push(item);
   }
   if (Array.isArray(message.photo) && message.photo.length) result.push({kind:'image'});
@@ -98,12 +110,12 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
     if (!Number.isSafeInteger(message.message_id) || message.message_id <= 0) return;
     const text = typeof message.text === 'string' ? message.text : typeof message.caption === 'string' ? message.caption : '';
     const attachments = metadata(message);
-    if ((!text && !attachments.length) || text.length > 20000) return;
+    if ((!text && !attachments.length) || text.length > 20000 || /\p{Surrogate}|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text)) return;
     const normalized = {
       id:String(message.message_id), senderId:ownerId, conversationId, text,
       replyContext:{messageId:message.message_id}, attachments
     };
-    if (Number.isSafeInteger(message.date) && message.date > 0) normalized.timestamp = message.date * 1000;
+    if (Number.isSafeInteger(message.date) && message.date > 0 && Number.isSafeInteger(message.date * 1000) && message.date * 1000 <= 8640000000000000) normalized.timestamp = message.date * 1000;
     if (Number.isSafeInteger(message.message_thread_id) && message.message_thread_id > 0) normalized.replyContext.threadId = message.message_thread_id;
     await onMessage(normalized);
   }

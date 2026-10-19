@@ -159,3 +159,24 @@ test('changing bot on the same persistent cursor is rejected before polling', as
   assert.equal(state.get('offset'),77);
   assert.equal(state.get('botId'),'999');
 });
+
+test('invalid optional metadata is omitted and unsupported raw text cannot poison the polling cursor', async t => {
+  const updates=[update(1),update(2,'text\u0000control'),update(3,'text\ud800surrogate'),update(4),update(5,'中文\n\t消息😀'),update(6),update(7)];
+  updates[0].message.document={file_name:'bad\u0000name',mime_type:'bad\u007fmime'};
+  delete updates[3].message.text;
+  updates[3].message.caption='bad\u000bcaption';
+  updates[3].message.voice={mime_type:'audio/ogg'};
+  updates[5].message.document={file_name:'a'.repeat(254)+'😀suffix',mime_type:'m'.repeat(126)+'😀suffix'};
+  updates[6].message.document={file_name:'',mime_type:'\udfff'};
+  const state=memory();const seen=[];let polls=0;
+  const fixture=api((body,signal)=>++polls===1?response(updates):suspended(signal));
+  const provider=createProvider({credentials,state,fetch:fixture.fetch,onMessage:async message=>seen.push(message)});
+  t.after(()=>provider.stop());
+  await provider.start();await until(()=>polls===2);
+  assert.equal(state.get('offset'),8);
+  assert.deepEqual(seen.map(message=>message.id),['1','5','6','7']);
+  assert.deepEqual(seen[0].attachments,[{kind:'file'}]);
+  assert.equal(seen[1].text,'中文\n\t消息😀');
+  assert.deepEqual(seen[2].attachments,[{kind:'file',name:'a'.repeat(254),mimeType:'m'.repeat(126)}]);
+  assert.deepEqual(seen[3].attachments,[{kind:'file'}]);
+});
