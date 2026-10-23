@@ -1,7 +1,7 @@
 # Provider implementation notes
 
 The Telegram transport uses only the official Bot API HTTPS origin, via POST
-JSON. There are no SDK dependencies or configurable API hosts. Shared MCP,
+JSON or bytes-only multipart uploads. There are no SDK dependencies or configurable API hosts. Shared MCP,
 storage, callback policy and outbox are supplied by `@dot-bridge/core/channels`.
 
 Initialization calls `getMe` and `getWebhookInfo`; a configured webhook blocks
@@ -15,11 +15,26 @@ polling conflict block automatic recovery. A small wait avoids an empty-poll
 busy loop.
 
 HTTP refuses redirects and limits responses to 2 MiB. Errors contain fixed
-strings. Attachment records contain only bounded type/name/MIME metadata, not
-Telegram file IDs or URLs. Replies use the stored private chat/message binding
+strings. Public attachment records contain only bounded type/name/MIME metadata.
+File IDs and declared sizes are retained in the encrypted private replyContext,
+aligned with metadata indexes. `getFile` and the constructed official per-bot
+download path are validated; redirects and media larger than 8 MiB are rejected.
+Replies use the stored private chat/message binding
 and disable link previews. There is no parse mode or automatic split/fallback.
 `sendMessage` has no idempotency parameter; no uncertain send is retried.
 Stop aborts pending requests and awaits the poll loop, ingestion and sends.
+
+Media replies use `sendPhoto`, `sendVoice` or `sendDocument` with bytes-only
+FormData. Synchronous validation rejects unsupported formats or captions before
+outbox queueing. Voice-note OGG data must be Opus encoded. Downloads and uploads
+are fixture-tested; this repository does not claim real-account media acceptance
+from synthetic fixtures alone.
+
+Owner pairing requires explicit stopped-consumer confirmation and a fresh
+128-bit nonce in the same user's one-to-one private chat. Pairing never sends
+messages, acknowledges updates, removes webhooks or overwrites credentials.
+The operator CLI reads through core private-file protection and writes a new
+file with the existing core directory/Windows primitives only after approval.
 
 Fixture tests cover durable offset ordering/redelivery, scope filtering,
 attachment metadata, stored reply binding, limits, uncertain sends, abort/drain,

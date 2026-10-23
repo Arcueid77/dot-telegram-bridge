@@ -1,1 +1,1 @@
-export const channel = Object.freeze({"id": "telegram", "name": "Telegram", "envPrefix": "TELEGRAM", "defaultPort": 8794, "maxReplyText": 4096});
+export const channel = Object.freeze({"id": "telegram", "name": "Telegram", "envPrefix": "TELEGRAM", "defaultPort": 8794, "maxReplyText": 4096, "maxMediaReplyText": 1024, media:Object.freeze({read:Object.freeze(['image', 'audio', 'file']), reply:Object.freeze(['image', 'audio', 'file'])})});

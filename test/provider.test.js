@@ -67,7 +67,7 @@ test('failed ingestion is redelivered without acknowledging it or later updates'
   assert.equal(state.get('offset'),7);
 });
 
-test('filters other users, groups, bot messages and service events; retains attachment metadata only', async t => {
+test('filters other users, groups, bot messages and service events; keeps file references private', async t => {
   const updates = [update(1),update(2),update(3),update(4),update(5),update(6)];
   updates[0].message.from.id=456;
   updates[1].message.chat.type='group';
@@ -86,7 +86,8 @@ test('filters other users, groups, bot messages and service events; retains atta
   assert.equal(state.get('offset'),7);
   assert.deepEqual(seen.map(m=>m.id),['5','6']);
   assert.deepEqual(seen[0].attachments,[{kind:'audio',mimeType:'audio/ogg'}]);
-  assert.equal(JSON.stringify(seen).includes('never-exposed'),false);
+  assert.equal(JSON.stringify(seen[0].attachments).includes('never-exposed'),false);
+  assert.equal(seen[0].replyContext.attachments[0].fileId,'never-exposed');
 });
 
 test('reply is bound to stored chat, sends plain text once and rejects oversized or altered binding', async t => {
