@@ -32,6 +32,21 @@ async function fixture(t, options = {}) {
   return {provider, message:seen[0], calls};
 }
 
+test('long Unicode answers upload one document with the full content instead of repeated text sends', async t => {
+  const fx = await fixture(t);
+  const text = '汉'.repeat(19998) + '🌏';
+  await fx.provider.sendReply({message: fx.message, text, idempotencyKey: 'long'});
+  const sends = fx.calls.filter(call => call.url.endsWith('/sendDocument'));
+  assert.equal(sends.length, 1);
+  assert.equal(await sends[0].init.body.get('document').text(), text);
+  assert.equal(sends[0].init.body.get('document').name, 'answer.txt');
+  assert.equal(fx.calls.filter(call => call.url.endsWith('/sendMessage')).length, 0);
+  const before = fx.calls.length;
+  await assert.rejects(fx.provider.sendReply({message: fx.message, text: 'x\uD800'}));
+  await assert.rejects(fx.provider.sendReply({message: fx.message, text: 'x'.repeat(20001)}));
+  assert.equal(fx.calls.length, before);
+});
+
 test('declares only implemented media types and reads matching private file references', async t => {
   const fx = await fixture(t);
   assert.deepEqual(channel.media,{read:['image','audio','file'],reply:['image','audio','file']});
@@ -42,6 +57,13 @@ test('declares only implemented media types and reads matching private file refe
   for (let i = 0; i < 3; i++) assert.deepEqual((await fx.provider.readAttachment({message:fx.message,attachmentIndex:i})).data,Buffer.from('DATA'));
   assert.deepEqual(fx.calls.filter(c=>c.url.endsWith('/getFile')).map(c=>JSON.parse(c.init.body).file_id),['voice-file','document-file','large']);
   for (const call of fx.calls.filter(c=>c.url.includes('/file/'))) assert.equal(call.init.headers,undefined);
+});
+
+test('an uncertain long-answer document send has no retry or text fallback', async t => {
+  const fx = await fixture(t, {send: async () => { throw new Error('private uncertain result'); }});
+  await assert.rejects(fx.provider.sendReply({message: fx.message, text: '汉'.repeat(4097), idempotencyKey: 'long'}));
+  assert.equal(fx.calls.filter(call => call.url.endsWith('/sendDocument')).length, 1);
+  assert.equal(fx.calls.filter(call => call.url.endsWith('/sendMessage')).length, 0);
 });
 
 test('uploads bytes as multipart to the original private chat with one reply per call', async t => {
@@ -67,8 +89,8 @@ test('rejects altered bindings, invalid index and oversized declared files befor
   await assert.rejects(fx.provider.readAttachment({message:{...fx.message,senderId:'999'},attachmentIndex:0}),/binding/);
   await assert.rejects(fx.provider.readAttachment({message:fx.message,attachmentIndex:-1}),/unavailable/);
   await assert.rejects(fx.provider.readAttachment({message:fx.message,attachmentIndex:10}),/unavailable/);
-  const oversized = structuredClone(fx.message); oversized.replyContext.attachments[0].size=8*1024*1024+1;
-  await assert.rejects(fx.provider.readAttachment({message:oversized,attachmentIndex:0}),/8 MiB/);
+  const oversized = structuredClone(fx.message); oversized.replyContext.attachments[0].size=5*1024*1024+1;
+  await assert.rejects(fx.provider.readAttachment({message:oversized,attachmentIndex:0}),/5 MiB/);
   assert.equal(fx.calls.length,count);
 });
 
@@ -81,12 +103,12 @@ test('getFile cannot escape the official per-bot file path', async t => {
   }
 });
 
-test('rejects redirects, changed final URL and bodies beyond the 8 MiB limit', async t => {
+test('rejects redirects, changed final URL and bodies beyond the 5 MiB limit', async t => {
   for (const download of [
     () => { const r=new Response('DATA');Object.defineProperty(r,'redirected',{value:true});return r; },
     () => { const r=new Response('DATA');Object.defineProperty(r,'url',{value:'https://evil.invalid/a'});return r; },
-    () => new Response('DATA',{headers:{'content-length':String(8*1024*1024+1)}}),
-    () => new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array(8*1024*1024));c.enqueue(new Uint8Array(1));c.close();}}))
+    () => new Response('DATA',{headers:{'content-length':String(5*1024*1024+1)}}),
+    () => new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array(5*1024*1024));c.enqueue(new Uint8Array(1));c.close();}}))
   ]) {
     const fx=await fixture(t,{download});
     await assert.rejects(fx.provider.readAttachment({message:fx.message,attachmentIndex:0}),/Telegram request failed/);
@@ -96,7 +118,7 @@ test('rejects redirects, changed final URL and bodies beyond the 8 MiB limit', a
 
 test('synchronous validation rejects unsafe uploads and oversized captions before queueing', async t => {
   const fx=await fixture(t); const base={type:'file',mimeType:'application/pdf',name:'a.pdf',data:Buffer.from('A')};
-  for (const media of [{...base,data:Buffer.alloc(0)},{...base,data:Buffer.alloc(8*1024*1024+1)},{...base,data:'https://evil.invalid/file'},{...base,name:'../x'},{...base,name:'a\r\nb'},{...base,mimeType:'a/b\r\nInjected: value'},{...base,type:'image'},{...base,type:'audio',mimeType:'audio/wav'}]) assert.throws(()=>fx.provider.validateMediaReply({media}));
+  for (const media of [{...base,data:Buffer.alloc(0)},{...base,data:Buffer.alloc(5*1024*1024+1)},{...base,data:'https://evil.invalid/file'},{...base,name:'../x'},{...base,name:'a\r\nb'},{...base,mimeType:'a/b\r\nInjected: value'},{...base,type:'image'},{...base,type:'audio',mimeType:'audio/wav'}]) assert.throws(()=>fx.provider.validateMediaReply({media}));
   assert.throws(()=>fx.provider.validateMediaReply({media:base,text:'x'.repeat(1025)}),/1024/);
   assert.doesNotThrow(()=>fx.provider.validateMediaReply({media:base,text:''}));
 });

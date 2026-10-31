@@ -1,14 +1,14 @@
 // Telegram Bot API transport. Shared authorization, inbox and outbox live in core.
+import {channel} from './channel.js';
+import {MAX_MEDIA_BYTES as MAX_MEDIA} from '@dot-bridge/core/channels/media.js';
 const API = 'https://api.telegram.org';
 const MAX_BODY = 2 * 1024 * 1024;
-const MAX_REPLY = 4096;
-const MAX_MEDIA = 8 * 1024 * 1024;
 const id = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value);
 const fileId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,1024}$/.test(value);
 const mime = value => typeof value === 'string' && /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(value) && value.length <= 127;
 
 function validateMediaReply({media, text = ''} = {}) {
-  if (!media || !['image', 'audio', 'file'].includes(media.type) || !Buffer.isBuffer(media.data) || media.data.length < 1 || media.data.length > MAX_MEDIA) throw new Error('Telegram media must contain 1 byte to 8 MiB.');
+  if (!media || !['image', 'audio', 'file'].includes(media.type) || !Buffer.isBuffer(media.data) || media.data.length < 1 || media.data.length > MAX_MEDIA) throw new Error('Telegram media must contain 1 byte to 5 MiB.');
   if (!mime(media.mimeType) || typeof media.name !== 'string' || !media.name || media.name.length > 255 || /[\u0000-\u001f\u007f/\\]|\p{Surrogate}/u.test(media.name) || ['.', '..'].includes(media.name)) throw new Error('Telegram media name or MIME type is invalid.');
   if (media.type === 'image' && !['image/jpeg', 'image/png'].includes(media.mimeType)) throw new Error('Telegram image replies require JPEG or PNG; send other formats as a file.');
   if (media.type === 'audio' && !['audio/ogg', 'audio/mpeg', 'audio/mp4'].includes(media.mimeType)) throw new Error('Telegram voice replies require OGG/Opus, MP3 or M4A; send other formats as a file.');
@@ -214,7 +214,7 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
     connected = false;
   }
 
-  return {
+  const provider = {
     async start() {
       if (started || controller.signal.aborted) throw new Error('Telegram provider cannot be started.');
       started = true;
@@ -250,7 +250,7 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
       if (!Number.isSafeInteger(attachmentIndex) || attachmentIndex < 0 || attachmentIndex >= (message.attachments?.length ?? 0) || attachmentIndex >= 10) throw new Error('Telegram attachment is unavailable.');
       const ref = message.replyContext.attachments?.[attachmentIndex];
       const item = message.attachments[attachmentIndex];
-      if (!fileId(ref?.fileId) || !['image', 'audio', 'file'].includes(item.kind) || (ref.size !== undefined && (!Number.isSafeInteger(ref.size) || ref.size < 0 || ref.size > MAX_MEDIA))) throw new Error('Telegram attachment is unavailable or exceeds 8 MiB.');
+      if (!fileId(ref?.fileId) || !['image', 'audio', 'file'].includes(item.kind) || (ref.size !== undefined && (!Number.isSafeInteger(ref.size) || ref.size < 0 || ref.size > MAX_MEDIA))) throw new Error('Telegram attachment is unavailable or exceeds 5 MiB.');
       const file = await request('getFile', {file_id:ref.fileId});
       if (file?.file_id !== ref.fileId || (file.file_size !== undefined && (!Number.isSafeInteger(file.file_size) || file.file_size < 0 || file.file_size > MAX_MEDIA))) throw failure();
       const result = await download(file.file_path);
@@ -272,9 +272,14 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
       if (!Number.isSafeInteger(sent?.message_id) || sent.message_id <= 0 || String(sent.chat?.id) !== conversationId) throw failure();
       return {providerMessageId:String(sent.message_id)};
     },
-    async sendReply({message, text, authorize = () => {}}) {
+    async sendReply({message, text, idempotencyKey, authorize = () => {}}) {
       binding(message);
-      if (typeof text !== 'string' || !text.trim() || text.length > MAX_REPLY) throw new Error('Telegram reply must contain 1 to 4096 characters.');
+      if (typeof text !== 'string' || !text.trim() || !text.isWellFormed() || text.length > channel.maxReplyText || Buffer.byteLength(text) > 60000) throw new Error('Telegram reply must contain 1 to 20,000 characters.');
+      if (text.length > channel.nativeMaxReplyText) {
+        const data = Buffer.from(text, 'utf8');
+        try { return await provider.sendMediaReply({message, media: {type: 'file', data, mimeType: 'text/plain', name: 'answer.txt'}, idempotencyKey, authorize}); }
+        finally { data.fill(0); }
+      }
       const payload = {chat_id:conversationId, text, reply_parameters:{message_id:message.replyContext.messageId, allow_sending_without_reply:true}, link_preview_options:{is_disabled:true}};
       const thread = message.replyContext.threadId;
       if (thread !== undefined) {
@@ -288,4 +293,5 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
       return {providerMessageId:String(sent.message_id)};
     }
   };
+  return provider;
 }

@@ -104,7 +104,7 @@ test('reply is bound to stored chat, sends plain text once and rejects oversized
   assert.equal(sent.parse_mode,undefined);
   assert.equal(sent.reply_parameters.message_id,1);
   await assert.rejects(provider.sendReply({message:{...message,conversationId:'999'},text:'no'}),/binding/);
-  await assert.rejects(provider.sendReply({message,text:'x'.repeat(4097)}),/4096/);
+  await assert.rejects(provider.sendReply({message,text:'x'.repeat(20001)}),/20,000/);
   assert.equal(fixture.calls.filter(c=>c.method==='sendMessage').length,1);
 });
 

@@ -18,9 +18,13 @@ HTTP refuses redirects and limits responses to 2 MiB. Errors contain fixed
 strings. Public attachment records contain only bounded type/name/MIME metadata.
 File IDs and declared sizes are retained in the encrypted private replyContext,
 aligned with metadata indexes. `getFile` and the constructed official per-bot
-download path are validated; redirects and media larger than 8 MiB are rejected.
+download path are validated; redirects and media larger than 5 MiB are rejected.
 Replies use the stored private chat/message binding
-and disable link previews. There is no parse mode or automatic split/fallback.
+and disable link previews. There is no parse mode or multi-send splitting.
+`sendReply` accepts at most 20,000 well-formed UTF-16 characters / 60,000 UTF-8
+bytes; above the native 4,096-character threshold it chooses one `sendDocument`
+with the complete `answer.txt` before sending anything. There is no alternate
+path after an uncertain upload/send.
 `sendMessage` has no idempotency parameter; no uncertain send is retried.
 Stop aborts pending requests and awaits the poll loop, ingestion and sends.
 
