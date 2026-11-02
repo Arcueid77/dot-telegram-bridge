@@ -244,6 +244,13 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
       await Promise.allSettled([...requests]);
     },
     status() { return {connected, running, blocked}; },
+    async sendOwnerMessage({text, authorize}) {
+      if (!running || controller.signal.aborted || typeof text !== 'string' || !text.trim() || !text.isWellFormed() || text.length > 2000) throw failure();
+      authorize();
+      const sent = await request('sendMessage', {chat_id:conversationId, text, link_preview_options:{is_disabled:true}});
+      if (!Number.isSafeInteger(sent?.message_id) || sent.message_id <= 0 || String(sent.chat?.id) !== conversationId) throw failure();
+      return {};
+    },
     validateMediaReply,
     async readAttachment({message, attachmentIndex}) {
       binding(message);

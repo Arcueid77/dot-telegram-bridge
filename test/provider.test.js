@@ -26,6 +26,13 @@ function api(poll, send = () => response({message_id:88,chat:{id:123}}), webhook
   return {fetch,calls};
 }
 
+test('proactive owner text uses the paired private chat without a source reply reference and never retries a failed POST',async t=>{
+  const fx=api((_body,signal)=>suspended(signal));const provider=createProvider({credentials,state:memory(),fetch:fx.fetch,onMessage:async()=>{}});t.after(()=>provider.stop());
+  await provider.start();let guards=0;await provider.sendOwnerMessage({text:'fixture notification',authorize:()=>{guards++;}});
+  const sent=fx.calls.filter(c=>c.method==='sendMessage');assert.equal(sent.length,1);assert.equal(sent[0].body.chat_id,'123');assert.equal(sent[0].body.text,'fixture notification');assert.equal(Object.hasOwn(sent[0].body,'reply_parameters'),false);assert.equal(guards,1);
+  await assert.rejects(provider.sendOwnerMessage({text:'blocked',authorize:()=>{throw Error('revoked');}}));assert.equal(fx.calls.filter(c=>c.method==='sendMessage').length,1);
+});
+
 test('long polling returns from start and commits offset only after durable ingestion', async t => {
   const state = memory();
   let release;

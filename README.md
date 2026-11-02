@@ -58,3 +58,9 @@ node --env-file=/etc/dot-bridge/telegram/telegram.env scripts/run-live.js --conf
 - [Telegram Bot API：更新、长轮询与发送消息](https://core.telegram.org/bots/api)
 - [Telegram Bot 入门](https://core.telegram.org/bots)
 - [DotBridge 统一安装与运行](https://github.com/Arcueid77/dot-bridge)
+
+## 定时消息
+
+新增主动文字和固定提醒：目标只允许已绑定的本人私聊，主动发送默认关闭。管理员批准后可设置 `DOT_BRIDGE_OUTBOUND=owner-text`；原 dot 通过发送、保存提醒、查询、修改和取消工具管理，不需要重建事件订阅。每条最多 2,000 字符，重复提醒需有结束日期。
+
+详见[定时消息使用指南](https://github.com/Arcueid77/dot-bridge/blob/dev/unified-distribution/docs/scheduled-messages.md)。
