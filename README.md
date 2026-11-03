@@ -1,5 +1,7 @@
 # dot-telegram-bridge
 
+[English](README.en.md)
+
 在你与 Telegram bot 的私聊里使用原来的 ChatGPT dot。这个仓库负责 Telegram 收发；安装、MCP Tunnel 和多渠道管理由 [DotBridge 总仓库](https://github.com/Arcueid77/dot-bridge) 提供。
 
 
@@ -44,7 +46,7 @@ node --env-file=/etc/dot-bridge/telegram/telegram.env scripts/run-live.js --conf
 - 可读取私聊中的图片、语音和文件，也可回复图片、语音或文件；每个附件最多 5 MiB。媒体说明最多 1024 字符。
 - 图片回复支持 JPEG、PNG；语音回复支持 OGG/Opus、MP3、M4A。其他格式可作为文件发送。附件只从 Telegram 下载，不接收任意下载网址。
 - 语音内容的转写由共享 core 中已配置的本地转写程序处理。没有配置时仍可取得音频文件，但不会自动获得文字；不会把“收到音频文件”说成“听懂了”。
-- 仅接收绑定用户在指定私聊里的新消息。群聊、频道、其他 bot、消息编辑、Business 和 Guest 消息不进入 dot。
+- 默认只接收绑定用户的指定私聊；群与论坛话题需显式配置受保护规则。频道、其他 bot、消息编辑、Business 和 Guest 消息仍不进入 dot。
 - 只有消息被本地持久接收后，才会保存并推进轮询位置。Telegram 对未收取更新的保存有时间限制，长时间离线的消息可能无法补收。
 - Bot API 发消息没有本项目可用的幂等键。发送结果不明确时不会自动重发。
 - 升级前已保存的附件只有名称和类型，无法追溯补出文件引用。需要读取这类旧附件时，请在原私聊重新发送。
@@ -63,4 +65,7 @@ node --env-file=/etc/dot-bridge/telegram/telegram.env scripts/run-live.js --conf
 
 新增主动文字和固定提醒：目标只允许已绑定的本人私聊，主动发送默认关闭。管理员批准后可设置 `DOT_BRIDGE_OUTBOUND=owner-text`；原 dot 通过发送、保存提醒、查询、修改和取消工具管理，不需要重建事件订阅。每条最多 2,000 字符，重复提醒需有结束日期。
 
-详见[定时消息使用指南](https://github.com/Arcueid77/dot-bridge/blob/dev/unified-distribution/docs/scheduled-messages.md)。
+详见[定时消息使用指南](https://github.com/Arcueid77/dot-bridge/blob/main/docs/scheduled-messages.md)。
+
+
+新增统一交互：受保护策略文件控制处理提示、近期上下文及聊天内管理。Telegram／Discord 另有真正增量编辑和按群／话题规则；新群默认关闭。配置见[统一交互说明](https://github.com/Arcueid77/dot-bridge/blob/main/docs/new-channels.md#统一交互与群聊规则)。

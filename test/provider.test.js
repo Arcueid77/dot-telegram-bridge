@@ -97,7 +97,7 @@ test('filters other users, groups, bot messages and service events; keeps file r
   assert.equal(seen[0].replyContext.attachments[0].fileId,'never-exposed');
 });
 
-test('reply is bound to stored chat, sends plain text once and rejects oversized or altered binding', async t => {
+test('reply is bound to stored chat, renders safe HTML once and rejects oversized or altered binding', async t => {
   let polls=0;
   let message;
   const fixture=api((body,signal)=>++polls===1?response([update(1)]):suspended(signal));
@@ -108,7 +108,7 @@ test('reply is bound to stored chat, sends plain text once and rejects oversized
   assert.deepEqual(await provider.sendReply({message,text:'answer',idempotencyKey:'stable'}),{providerMessageId:'88'});
   const sent=fixture.calls.find(c=>c.method==='sendMessage').body;
   assert.equal(sent.chat_id,'123');
-  assert.equal(sent.parse_mode,undefined);
+  assert.equal(sent.parse_mode,'HTML');
   assert.equal(sent.reply_parameters.message_id,1);
   await assert.rejects(provider.sendReply({message:{...message,conversationId:'999'},text:'no'}),/binding/);
   await assert.rejects(provider.sendReply({message,text:'x'.repeat(20001)}),/20,000/);

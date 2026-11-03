@@ -1,5 +1,7 @@
 // Telegram Bot API transport. Shared authorization, inbox and outbox live in core.
 import {channel} from './channel.js';
+import {conversationRoute,interactionPolicy} from '@dot-bridge/core/channels/experience-policy.js';
+import {telegramHTML,splitTelegramHTML,clipText} from '@dot-bridge/core/channels/formatting.js';
 import {MAX_MEDIA_BYTES as MAX_MEDIA} from '@dot-bridge/core/channels/media.js';
 const API = 'https://api.telegram.org';
 const MAX_BODY = 2 * 1024 * 1024;
@@ -75,7 +77,7 @@ function metadata(message) {
   return {attachments:result.slice(0, 10), references:references.slice(0, 10)};
 }
 
-export function createProvider({credentials, state, onMessage, signal, fetch = globalThis.fetch}) {
+export function createProvider({credentials, interaction, state, onMessage, signal, fetch = globalThis.fetch}) {
   const {botToken, ownerId, conversationId} = credentials ?? {};
   if (typeof botToken !== 'string' || !/^[1-9][0-9]{0,19}:[A-Za-z0-9_-]{20,200}$/.test(botToken) || !id(ownerId) || !id(conversationId)) {
     throw new Error('Telegram credentials require a bot token and numeric owner/private chat IDs.');
@@ -89,6 +91,8 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
   let blocked = false;
   let started = false;
   let loop = Promise.resolve();
+  let selfId,botUsername;
+  const policy=interaction??interactionPolicy({},channel);
   const requests = new Set();
 
   function request(method, payload = {}, timeout = 15000) {
@@ -117,11 +121,16 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
   }
 
   function binding(message) {
-    if (!running || controller.signal.aborted) throw new Error('Telegram provider is not running.');
-    if (message?.senderId !== ownerId || message?.conversationId !== conversationId || !Number.isSafeInteger(message.replyContext?.messageId) || message.replyContext.messageId <= 0 || String(message.replyContext.messageId) !== message.id) throw new Error('Telegram reply binding is invalid.');
-    const thread = message.replyContext.threadId;
-    if (thread !== undefined && (!Number.isSafeInteger(thread) || thread <= 0)) throw new Error('Telegram reply binding is invalid.');
+    if (!running || controller.signal.aborted || !conversationRoute({channel,credentials,interaction:policy},message)) throw new Error('Telegram reply binding is invalid.');
+    if (!Number.isSafeInteger(message.replyContext?.messageId) || message.replyContext.messageId<=0 || String(message.replyContext.messageId)!==message.id) throw new Error('Telegram reply binding is invalid.');
+    if (message.replyContext.threadId!==undefined&&(!Number.isSafeInteger(message.replyContext.threadId)||message.replyContext.threadId<=0)) throw new Error('Telegram reply binding is invalid.');
+    return message.conversationId;
   }
+  function textPayload(message,text,format='text') {
+    const target=binding(message),html=format==='html'?text:telegramHTML(text).html;
+    return {chat_id:target,text:html,parse_mode:'HTML',reply_parameters:{message_id:message.replyContext.messageId,allow_sending_without_reply:true},link_preview_options:{is_disabled:true},...(message.replyContext.threadId===undefined?{}:{message_thread_id:message.replyContext.threadId})};
+  }
+  function checkedMessage(value,target) { if(!Number.isSafeInteger(value?.message_id)||value.message_id<=0||String(value.chat?.id)!==target)throw failure();return value; }
 
   function download(path) {
     // getFile supplies the path, but it must remain under this bot's official file endpoint.
@@ -168,19 +177,26 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
   }
 
   async function ingest(update) {
-    const message = update.message;
-    if (!message || message.chat?.type !== 'private' || message.from?.is_bot !== false || String(message.from.id) !== ownerId || String(message.chat.id) !== conversationId) return;
-    if (!Number.isSafeInteger(message.message_id) || message.message_id <= 0) return;
-    const text = typeof message.text === 'string' ? message.text : typeof message.caption === 'string' ? message.caption : '';
-    if (/^\/start db_[a-f0-9]{32}$/.test(text)) return;
-    const {attachments, references} = metadata(message);
-    if ((!text && !attachments.length) || text.length > 20000 || /\p{Surrogate}|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text)) return;
-    const normalized = {
-      id:String(message.message_id), senderId:ownerId, conversationId, text,
-      replyContext:{messageId:message.message_id, attachments:references}, attachments
-    };
-    if (Number.isSafeInteger(message.date) && message.date > 0 && Number.isSafeInteger(message.date * 1000) && message.date * 1000 <= 8640000000000000) normalized.timestamp = message.date * 1000;
-    if (Number.isSafeInteger(message.message_thread_id) && message.message_thread_id > 0) normalized.replyContext.threadId = message.message_thread_id;
+    const message=update.message;
+    if(!message||message.from?.is_bot!==false||!Number.isSafeInteger(message.from.id)||!Number.isSafeInteger(message.chat?.id)||!Number.isSafeInteger(message.message_id)||message.message_id<=0)return;
+    const chatType=message.chat.type==='private'?'private':['group','supergroup'].includes(message.chat.type)?'group':null;if(!chatType)return;
+    const text=typeof message.text==='string'?message.text:typeof message.caption==='string'?message.caption:'';
+    if(/^\/start db_[a-f0-9]{32}$/.test(text))return;
+    const {attachments,references}=metadata(message);
+    if((!text&&!attachments.length)||text.length>20000||!text.isWellFormed()||/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text))return;
+    const entities=message.entities??message.caption_entities??[];
+    const botMentioned=message.reply_to_message?.from?.id===Number(selfId)&&String(message.reply_to_message?.chat?.id??message.chat.id)===String(message.chat.id)||Array.isArray(entities)&&entities.some(entity=>{
+      if(entity.type==='text_mention')return String(entity.user?.id)===selfId;
+      if(!Number.isSafeInteger(entity.offset)||!Number.isSafeInteger(entity.length)||entity.offset<0||entity.length<1)return false;
+      const value=text.slice(entity.offset,entity.offset+entity.length).toLowerCase();
+      return !!botUsername&&(entity.type==='mention'&&value==='@'+botUsername.toLowerCase()||entity.type==='bot_command'&&value.endsWith('@'+botUsername.toLowerCase()));
+    });
+    const normalized={id:String(message.message_id),senderId:String(message.from.id),conversationId:String(message.chat.id),chatType,botMentioned,text,forwarded:!!(message.forward_origin||message.forward_from||message.forward_from_chat||message.forward_date||message.is_automatic_forward),replyContext:{messageId:message.message_id,attachments:references},attachments};
+    if(Number.isSafeInteger(message.message_thread_id)&&message.message_thread_id>0){normalized.replyContext.threadId=message.message_thread_id;normalized.threadId=String(message.message_thread_id);}
+    if(!conversationRoute({channel,credentials,interaction:policy},normalized))return;
+    const quoted=message.reply_to_message;
+    if(quoted&&String(quoted.chat?.id??message.chat.id)===normalized.conversationId){const quote=typeof quoted.text==='string'?quoted.text:typeof quoted.caption==='string'?quoted.caption:'';if(quote&&quote.isWellFormed())normalized.quote={text:clipText(quote,4000),truncated:quote.length>4000};}
+    if(Number.isSafeInteger(message.date)&&message.date>0&&Number.isSafeInteger(message.date*1000)&&message.date*1000<=8640000000000000)normalized.timestamp=message.date*1000;
     await onMessage(normalized);
   }
 
@@ -225,7 +241,7 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
         if (!webhook || typeof webhook.url !== 'string' || webhook.url !== '') throw new Error('Telegram already has a webhook; coordinate its removal before polling.');
         const storedBot = state.get('botId');
         if (storedBot !== undefined && storedBot !== String(me.id)) throw failure(true);
-        state.set('botId', String(me.id));
+        state.set('botId', String(me.id));selfId=String(me.id);botUsername=typeof me.username==='string'?me.username:'';
         if (controller.signal.aborted) throw failure();
         running = true;
         loop = poll().catch(() => { running = false; connected = false; blocked = true; });
@@ -251,6 +267,24 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
       if (!Number.isSafeInteger(sent?.message_id) || sent.message_id <= 0 || String(sent.chat?.id) !== conversationId) throw failure();
       return {};
     },
+    async setFeedback({message,active,authorize}) {
+      const target=binding(message);authorize();await request('setMessageReaction',{chat_id:target,message_id:message.replyContext.messageId,reaction:active?[{type:'emoji',emoji:'👀'}]:[],is_big:false},5000);return null;
+    },
+    async setTyping({message,active,authorize}) {
+      const target=binding(message);if(!active)return;authorize();await request('sendChatAction',{chat_id:target,action:'typing',...(message.replyContext.threadId===undefined?{}:{message_thread_id:message.replyContext.threadId})},5000);
+    },
+    canProgressFinal({text,format}) {return (format==='html'?text.replace(/<[^>]*>/g,'').replace(/&(?:amp|lt|gt|quot);/g,'x').length:telegramHTML(text).plain.length)<=channel.nativeMaxReplyText;},
+    async sendProgress({message,text,format,reference,final=false,authorize}) {
+      const target=binding(message);
+      if(!final&&telegramHTML(text).plain.length>3900)text=clipText(text,3000)+'\n…（完整回答将在完成后发送 / full answer follows）';
+      const payload=textPayload(message,text,format);
+      authorize();
+      if(reference){if(reference.conversationId!==target||!id(reference.id))throw failure();const result=await request('editMessageText',{chat_id:target,message_id:Number(reference.id),text:payload.text,parse_mode:'HTML',link_preview_options:{is_disabled:true}},10000);checkedMessage(result,target);return reference;}
+      const result=checkedMessage(await request('sendMessage',{...payload,disable_notification:true},10000),target);return {id:String(result.message_id),conversationId:target};
+    },
+    async finishProgress({message,reference,cancelled,authorize}) {if(!cancelled)return;const target=binding(message);if(reference.conversationId!==target||!id(reference.id))throw failure();authorize();await request('deleteMessage',{chat_id:target,message_id:Number(reference.id)},10000);},
+    planTextReply(text) {return splitTelegramHTML(telegramHTML(text).html).map(text=>({text,format:'html'}));},
+    async sendTextPart({message,text,format,authorize}) {const payload=textPayload(message,text,format);authorize();const result=checkedMessage(await request('sendMessage',payload),message.conversationId);return {providerMessageId:String(result.message_id)};},
     validateMediaReply,
     async readAttachment({message, attachmentIndex}) {
       binding(message);
@@ -268,7 +302,7 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
       validateMediaReply({media, text});
       const field = {image:'photo', audio:'voice', file:'document'}[media.type];
       const form = new FormData();
-      form.set('chat_id', conversationId);
+      form.set('chat_id', message.conversationId);
       form.set('reply_parameters', JSON.stringify({message_id:message.replyContext.messageId, allow_sending_without_reply:true}));
       if (message.replyContext.threadId !== undefined) form.set('message_thread_id', String(message.replyContext.threadId));
       if (text) form.set('caption', text);
@@ -276,27 +310,21 @@ export function createProvider({credentials, state, onMessage, signal, fetch = g
       // No URL uploads and no automatic retry: a failed POST may already have delivered.
       authorize();
       const sent = await request({image:'sendPhoto', audio:'sendVoice', file:'sendDocument'}[media.type], form, 30000);
-      if (!Number.isSafeInteger(sent?.message_id) || sent.message_id <= 0 || String(sent.chat?.id) !== conversationId) throw failure();
+      if (!Number.isSafeInteger(sent?.message_id) || sent.message_id <= 0 || String(sent.chat?.id) !== message.conversationId) throw failure();
       return {providerMessageId:String(sent.message_id)};
     },
     async sendReply({message, text, idempotencyKey, authorize = () => {}}) {
       binding(message);
       if (typeof text !== 'string' || !text.trim() || !text.isWellFormed() || text.length > channel.maxReplyText || Buffer.byteLength(text) > 60000) throw new Error('Telegram reply must contain 1 to 20,000 characters.');
-      if (text.length > channel.nativeMaxReplyText) {
-        const data = Buffer.from(text, 'utf8');
-        try { return await provider.sendMediaReply({message, media: {type: 'file', data, mimeType: 'text/plain', name: 'answer.txt'}, idempotencyKey, authorize}); }
-        finally { data.fill(0); }
+      if (telegramHTML(text).plain.length > channel.nativeMaxReplyText) {
+        const data=Buffer.from(text,'utf8');try{return await provider.sendMediaReply({message,media:{type:'file',data,mimeType:'text/plain',name:'answer.txt'},idempotencyKey,authorize});}finally{data.fill(0);}
       }
-      const payload = {chat_id:conversationId, text, reply_parameters:{message_id:message.replyContext.messageId, allow_sending_without_reply:true}, link_preview_options:{is_disabled:true}};
-      const thread = message.replyContext.threadId;
-      if (thread !== undefined) {
-        if (!Number.isSafeInteger(thread) || thread <= 0) throw new Error('Telegram reply binding is invalid.');
-        payload.message_thread_id = thread;
-      }
+      const payload=textPayload(message,text);
+
       // Bot API sendMessage has no idempotency key. A failed send is never retried here.
       authorize();
       const sent = await request('sendMessage', payload);
-      if (!Number.isSafeInteger(sent?.message_id) || String(sent.chat?.id) !== conversationId) throw failure();
+      if (!Number.isSafeInteger(sent?.message_id) || String(sent.chat?.id) !== message.conversationId) throw failure();
       return {providerMessageId:String(sent.message_id)};
     }
   };
