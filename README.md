@@ -7,7 +7,9 @@
 
 可以让 dot 把收到的图片、语音或文件直接发回原私聊，例如“把这张图发回来”。桥会按附件编号读取，不需要来回传递很长的编码文本。仍需符合本渠道的格式和大小限制；无法作为语音发送的已识别音频，可以明确选择作为文件回复。
 
-TXT、Markdown、JSON、CSV 等文本附件会提供可读的文字摘录，支持 UTF-8 和带标记的 UTF-16；过长时明确标记为截断，原文件仍可读取。其他格式继续保留原件。
+TXT、Markdown、JSON、CSV 等文本附件会提供可读的文字摘录，支持 UTF-8 和带标记的 UTF-16；过长时明确标记为截断，原文件仍可读取。PDF／Office 文本摘录复用受保护的 Linux 处理环境；格式未被提取时保留原件。
+
+运行主机可使用持续开机的 Linux 或 Windows 电脑，Linux 支持 systemd。macOS 尚未验证，欢迎试用并反馈。
 
 ## 使用前准备
 
@@ -42,7 +44,7 @@ node --env-file=/etc/dot-bridge/telegram/telegram.env scripts/run-live.js --conf
 
 ## 当前用法与限制
 
-- 接收文字，回复最多 20,000 字符的完整回答。超过 Telegram 一条文字的 4,096 字符时，改为一次最终回复发送一份 `answer.txt` 文件，不截断或分成多条发送。
+- 接收文字，回复最多 20,000 字符的完整回答。超过 Telegram 一条文字的 4,096 字符时，默认以完整 `answer.txt` 文件完成回复；受保护策略也可选择持久分段。
 - 可读取私聊中的图片、语音和文件，也可回复图片、语音或文件；每个附件最多 5 MiB。媒体说明最多 1024 字符。
 - 图片回复支持 JPEG、PNG；语音回复支持 OGG/Opus、MP3、M4A。其他格式可作为文件发送。附件只从 Telegram 下载，不接收任意下载网址。
 - 语音内容的转写由共享 core 中已配置的本地转写程序处理。没有配置时仍可取得音频文件，但不会自动获得文字；不会把“收到音频文件”说成“听懂了”。
@@ -53,7 +55,7 @@ node --env-file=/etc/dot-bridge/telegram/telegram.env scripts/run-live.js --conf
 
 同一个 bot 同时只运行一个消费实例，也不能同时配置 webhook 与长轮询。迁移时保留原存储密钥和数据库，并先停止旧实例；总仓库提供统一启停和回滚说明。
 
-如果 bot 没有回复，先查看连接状态：未连接时检查 Token、本人绑定、旧实例或 webhook；已经连接且待处理消息增加时，查看原 dot 的 Telegram 消息订阅。原 dot 需要订阅 `telegram.message.created` 并限定 `conversation=owner`。创建失败时保留脱敏错误和时间，修正原因后再尝试，避免反复创建同一订阅。
+如果 bot 没有回复，先查看连接状态：未连接时检查 Token、本人绑定、旧实例或 webhook；已经连接且待处理消息增加时，查看原 dot 的 Telegram 消息订阅。本人私聊订阅使用 `telegram.message.created`、`conversation=owner`；启用群规则后按下文协调原订阅范围。创建失败时保留脱敏错误和时间，修正原因后再尝试，避免反复创建同一订阅。
 
 ## 平台资料
 
@@ -68,4 +70,49 @@ node --env-file=/etc/dot-bridge/telegram/telegram.env scripts/run-live.js --conf
 详见[定时消息使用指南](https://github.com/Arcueid77/dot-bridge/blob/main/docs/scheduled-messages.md)。
 
 
-新增统一交互：受保护策略文件控制处理提示、近期上下文及聊天内管理。Telegram／Discord 另有真正增量编辑和按群／话题规则；新群默认关闭。配置见[统一交互说明](https://github.com/Arcueid77/dot-bridge/blob/main/docs/new-channels.md#统一交互与群聊规则)。
+## 处理提示、上下文与聊天内管理
+
+在私有环境文件里设置 `DOT_BRIDGE_INTERACTION_POLICY_FILE`，指向运行用户持有的 JSON 文件。Linux 目录 `0700`、文件 `0600`；Windows 使用私有 ACL。先以本人私聊配置开始：
+
+```json
+{
+  "version": 1,
+  "feedback": {"enabled": true, "reaction": true, "typing": true, "streaming": true, "lease_seconds": 60},
+  "context": {"max_messages": 20, "max_chars": 12000},
+  "replies": {"long_text": "file"},
+  "management": {"enabled": true},
+  "groups": []
+}
+```
+
+收到消息后可显示接收提示；原 dot 读取消息或明确开始处理后显示有时限的 typing。完成、取消、失败或到期后清理提示。`get_telegram_context` 提供同一会话、话题和成员范围内的保留历史及引用。
+
+本人私聊可使用 `/help`、`/status`、`/queue`、`/subscription`、`/cancel [编号]`。取消作用于尚未发送的桥接回复；发送中和结果不明的记录保留核对。订阅由原 dot／平台按真实有效期续订。
+
+`get_telegram_reply_status` 查询最终投递：`none` 表示尚未排队，`pending` 表示已排队，`processing` 表示最终消息正在写出，`sent` 表示平台确认。处理提示有独立的租约；开始处理后仍需提交本次最终回答。`uncertain` 保持人工核对，不自动补发。
+
+原 dot 使用 `begin_telegram_reply` 开始真实处理，用 `append_telegram_reply` 提交从序号 1 起连续增长的完整累计文本，最后以 `reply_to_telegram` 完成同一条消息。短回答直接完成即可。长文默认完整文件；将 `replies.long_text` 设为 `chunks` 可启用有持久确认的原生分段。
+
+## 可配置群与话题
+
+新群默认关闭。在同一策略的 `groups` 中加入经本人确认的群或频道规则：
+
+```json
+{
+  "conversation_id": "REPLACE_WITH_VERIFIED_GROUP_OR_CHANNEL_ID",
+  "enabled": true,
+  "members": "all",
+  "mention": true,
+  "auto_reply": "off",
+  "reply_in_thread": true,
+  "context_scope": "sender"
+}
+```
+
+`members` 可选 `owner`、`allowlist`、`all`；白名单模式填写 `allow_from`。`auto_reply` 可选 `off`、`keywords`、`all`，关键词模式填写 `keywords`。只有对应模式才填写白名单或关键词。真实 @ 与自动触发按 OR 组合。`context_scope` 默认 `sender`，也可显式设为 `group`；会话与话题始终分开。
+
+启用前先处理在途回复，再协调原任务的唯一订阅改为 `conversation=configured`。按真实订阅流程完成切换，保留原数据库和去重状态。原 dot 的群任务按源会话处理，私聊记忆保持私密。平台权限和新增接收范围由操作者确认。
+
+Telegram 使用官方 mention 实体或对本 bot 的回复识别触发，并保留论坛话题。关键词／全消息模式需要管理员核对 BotFather 的群隐私配置及实际可见消息；调整前确认接收范围。Markdown 会转为安全 HTML。
+
+配置字段的范围与私有文件要求见[统一交互说明](https://github.com/Arcueid77/dot-bridge/blob/main/docs/new-channels.md#统一交互与群聊规则)。

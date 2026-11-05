@@ -1,5 +1,12 @@
 # Provider implementation notes
 
+## 当前文档基线 / Current documentation baseline
+
+组件 0.6.1 使用固定 core 0.11.1，版本和源 SHA 以 `package.json`、`vendor/core-release.json` 及锁文件为准。Windows／Linux CI 已运行。2026-11-05 记录：Telegram 三次增量、加粗列表、原生引用及重启后回复完成。
+
+Source documentation follows registered capabilities. Preserve reviewed artifacts and package documentation through the next normal release. Actual account acceptance remains separate.
+
+
 The Telegram transport uses only the official Bot API HTTPS origin, via POST
 JSON or bytes-only multipart uploads. There are no SDK dependencies or configurable API hosts. Shared MCP,
 storage, callback policy and outbox are supplied by `@dot-bridge/core/channels`.

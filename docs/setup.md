@@ -1,5 +1,7 @@
 # 连接 Telegram
 
+[English](setup.en.md)
+
 先在官方 [BotFather](https://t.me/BotFather) 创建一个专用 bot。Token 只放进运行主机的私有文件，不放在聊天、命令参数或 Git 中。
 
 ## 配对你本人的私聊
