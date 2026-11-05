@@ -33,6 +33,20 @@ test('proactive owner text uses the paired private chat without a source reply r
   await assert.rejects(provider.sendOwnerMessage({text:'blocked',authorize:()=>{throw Error('revoked');}}));assert.equal(fx.calls.filter(c=>c.method==='sendMessage').length,1);
 });
 
+test('native choices preserve callback identity and install only the paired private command menu',async t=>{
+ const token='db_'+'a'.repeat(24),selected=[],extra=[],state=memory();let polls=0;
+ const fx=api((_body,signal)=>++polls===1?response([{update_id:101,callback_query:{id:'query-1',from:{id:123,is_bot:false},data:token,message:{message_id:88,from:{id:12345,is_bot:true},chat:{id:123,type:'private'}}}}]):suspended(signal));
+ const provider=createProvider({credentials,state,onMessage:async()=>{},onChoice:async input=>{selected.push(input);return {accepted:true,label:'PDF'};},fetch:async(url,init)=>{
+  const method=url.split('/').at(-1),body=JSON.parse(init.body);
+  if(['setMyCommands','answerCallbackQuery'].includes(method)){extra.push({method,body});return response(true);}
+  return fx.fetch(url,init);
+ }});t.after(()=>provider.stop());await provider.start();await until(()=>selected.length===1);
+ assert.equal(selected[0].message.id,'88');assert.equal(selected[0].message.replyContext.messageId,88);assert.equal(selected[0].senderId,'123');
+ assert.deepEqual(extra.find(v=>v.method==='setMyCommands').body.scope,{type:'chat',chat_id:'123'});
+ await provider.sendChoiceReply({message:{id:'21',senderId:'123',conversationId:'123',replyContext:{messageId:21}},text:'Choose',choices:[{label:'PDF',token}],authorize:()=>{}});
+ const sent=fx.calls.findLast(v=>v.method==='sendMessage');assert.equal(sent.body.reply_markup.inline_keyboard[0][0].callback_data,token);assert.equal(sent.body.chat_id,'123');
+});
+
 test('long polling returns from start and commits offset only after durable ingestion', async t => {
   const state = memory();
   let release;

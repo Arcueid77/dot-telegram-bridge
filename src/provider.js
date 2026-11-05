@@ -3,6 +3,7 @@ import {channel} from './channel.js';
 import {conversationRoute,interactionPolicy} from '@dot-bridge/core/channels/experience-policy.js';
 import {telegramHTML,splitTelegramHTML,clipText} from '@dot-bridge/core/channels/formatting.js';
 import {MAX_MEDIA_BYTES as MAX_MEDIA} from '@dot-bridge/core/channels/media.js';
+import {AlbumBuffer} from './album-buffer.js';
 const API = 'https://api.telegram.org';
 const MAX_BODY = 2 * 1024 * 1024;
 const id = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value);
@@ -77,7 +78,7 @@ function metadata(message) {
   return {attachments:result.slice(0, 10), references:references.slice(0, 10)};
 }
 
-export function createProvider({credentials, interaction, state, onMessage, signal, fetch = globalThis.fetch}) {
+export function createProvider({credentials, interaction, state, onMessage, onChoice, signal, fetch = globalThis.fetch,albumTiming={}}) {
   const {botToken, ownerId, conversationId} = credentials ?? {};
   if (typeof botToken !== 'string' || !/^[1-9][0-9]{0,19}:[A-Za-z0-9_-]{20,200}$/.test(botToken) || !id(ownerId) || !id(conversationId)) {
     throw new Error('Telegram credentials require a bot token and numeric owner/private chat IDs.');
@@ -177,6 +178,15 @@ export function createProvider({credentials, interaction, state, onMessage, sign
   }
 
   async function ingest(update) {
+    if(update.callback_query){
+      const query=update.callback_query,message=query.message;
+      if(typeof onChoice!=='function'||typeof query.id!=='string'||query.id.length>256||query.from?.is_bot!==false||!Number.isSafeInteger(query.from.id)||!Number.isSafeInteger(message?.chat?.id)||!Number.isSafeInteger(message.message_id)||message.message_id<=0||String(message.from?.id)!==selfId||typeof query.data!=='string'||!/^db_[A-Za-z0-9_-]{24}$/.test(query.data))return;
+      const normalized={id:String(message.message_id),senderId:String(query.from.id),conversationId:String(message.chat.id),botMentioned:true,text:'',replyContext:{messageId:message.message_id},attachments:[]};
+      if(Number.isSafeInteger(message.message_thread_id)&&message.message_thread_id>0){normalized.threadId=String(message.message_thread_id);normalized.replyContext.threadId=message.message_thread_id;}
+      const result=await onChoice({token:query.data,senderId:normalized.senderId,conversationId:normalized.conversationId,threadId:normalized.threadId,message:normalized});
+      await request('answerCallbackQuery',{callback_query_id:query.id,text:result?.accepted?'已选择 '+result.label:'选项已过期或已由原发送者处理',cache_time:0},5000);
+      return;
+    }
     const message=update.message;
     if(!message||message.from?.is_bot!==false||!Number.isSafeInteger(message.from.id)||!Number.isSafeInteger(message.chat?.id)||!Number.isSafeInteger(message.message_id)||message.message_id<=0)return;
     const chatType=message.chat.type==='private'?'private':['group','supergroup'].includes(message.chat.type)?'group':null;if(!chatType)return;
@@ -193,20 +203,28 @@ export function createProvider({credentials, interaction, state, onMessage, sign
     });
     const normalized={id:String(message.message_id),senderId:String(message.from.id),conversationId:String(message.chat.id),chatType,botMentioned,text,forwarded:!!(message.forward_origin||message.forward_from||message.forward_from_chat||message.forward_date||message.is_automatic_forward),replyContext:{messageId:message.message_id,attachments:references},attachments};
     if(Number.isSafeInteger(message.message_thread_id)&&message.message_thread_id>0){normalized.replyContext.threadId=message.message_thread_id;normalized.threadId=String(message.message_thread_id);}
-    if(!conversationRoute({channel,credentials,interaction:policy},normalized))return;
+    const route=conversationRoute({channel,credentials,interaction:policy},normalized);
+    const album=typeof message.media_group_id==='string'&&message.media_group_id.length<=256&&normalized.attachments.length>0;
+    const group=policy.groups.find(item=>item.enabled&&item.conversationId===normalized.conversationId);
+    const admittedMember=group&&(group.members==='all'||group.members==='owner'&&normalized.senderId===ownerId||group.members==='allowlist'&&group.allowFrom.includes(normalized.senderId));
+    if(!route&&!(album&&chatType==='group'&&admittedMember))return;
     const quoted=message.reply_to_message;
     if(quoted&&String(quoted.chat?.id??message.chat.id)===normalized.conversationId){const quote=typeof quoted.text==='string'?quoted.text:typeof quoted.caption==='string'?quoted.caption:'';if(quote&&quote.isWellFormed())normalized.quote={text:clipText(quote,4000),truncated:quote.length>4000};}
     if(Number.isSafeInteger(message.date)&&message.date>0&&Number.isSafeInteger(message.date*1000)&&message.date*1000<=8640000000000000)normalized.timestamp=message.date*1000;
-    await onMessage(normalized);
+    if(album)await albums.add(normalized,message.media_group_id);
+    else await onMessage(normalized);
   }
+
+  const albums=new AlbumBuffer({state,onMessage,authorize:message=>!!conversationRoute({channel,credentials,interaction:policy},message),...albumTiming});
 
   async function poll() {
     let backoff = 1000;
     while (running && !controller.signal.aborted) {
       try {
+        await albums.flushReady();
         const offset = state.get('offset');
         if (offset !== undefined && (!Number.isSafeInteger(offset) || offset < 0)) throw failure(true);
-        const updates = await request('getUpdates', {timeout:30, limit:100, allowed_updates:['message'], ...(offset !== undefined ? {offset} : {})}, 40000);
+        const updates = await request('getUpdates', {timeout:albums.hasPending()?1:30, limit:100, allowed_updates:typeof onChoice==='function'?['message','callback_query']:['message'], ...(offset !== undefined ? {offset} : {})}, 40000);
         if (!Array.isArray(updates) || updates.length > 100 || updates.some(u => !Number.isSafeInteger(u?.update_id) || u.update_id < 0 || !Number.isSafeInteger(u.update_id + 1))) throw failure();
         connected = true;
         for (const update of [...updates].sort((a,b) => a.update_id - b.update_id)) {
@@ -217,6 +235,7 @@ export function createProvider({credentials, interaction, state, onMessage, sign
           state.set('offset', update.update_id + 1);
         }
         backoff = 1000;
+        await albums.flushReady();
         // Avoid a hot loop if an upstream proxy answers empty long polls early.
         if (updates.length === 0) await wait(100);
       } catch (error) {
@@ -242,6 +261,12 @@ export function createProvider({credentials, interaction, state, onMessage, sign
         const storedBot = state.get('botId');
         if (storedBot !== undefined && storedBot !== String(me.id)) throw failure(true);
         state.set('botId', String(me.id));selfId=String(me.id);botUsername=typeof me.username==='string'?me.username:'';
+        if(typeof onChoice==='function'&&policy.management.enabled&&state.get('ownerMenuVersion')!==1){
+          try{
+            await request('setMyCommands',{scope:{type:'chat',chat_id:conversationId},commands:[{command:'help',description:'查看可用操作'},{command:'status',description:'查看连接与队列状态'},{command:'queue',description:'查看当前待回复消息'},{command:'subscription',description:'查看原 dot 的订阅状态'},{command:'cancel',description:'取消最近一条尚未发送的桥接回复'}]},5000);
+            state.set('ownerMenuVersion',1);
+          }catch{/* A command-menu failure must not stop the message consumer. */}
+        }
         if (controller.signal.aborted) throw failure();
         running = true;
         loop = poll().catch(() => { running = false; connected = false; blocked = true; });
@@ -274,6 +299,21 @@ export function createProvider({credentials, interaction, state, onMessage, sign
       const target=binding(message);if(!active)return;authorize();await request('sendChatAction',{chat_id:target,action:'typing',...(message.replyContext.threadId===undefined?{}:{message_thread_id:message.replyContext.threadId})},5000);
     },
     canProgressFinal({text,format}) {return (format==='html'?text.replace(/<[^>]*>/g,'').replace(/&(?:amp|lt|gt|quot);/g,'x').length:telegramHTML(text).plain.length)<=channel.nativeMaxReplyText;},
+    async sendChoiceReply({message,text,choices,reference,authorize}) {
+      const target=binding(message);
+      const buttons=choices.map(choice=>({text:choice.label,callback_data:choice.token}));
+      const keyboard=[];
+      for(let index=0;index<buttons.length;index+=2)keyboard.push(buttons.slice(index,index+2));
+      const payload={...textPayload(message,text),reply_markup:{inline_keyboard:keyboard}};
+      authorize();
+      if(reference){
+        if(reference.conversationId!==target||!id(reference.id))throw failure();
+        checkedMessage(await request('editMessageText',{chat_id:target,message_id:Number(reference.id),text:payload.text,parse_mode:'HTML',reply_markup:payload.reply_markup},10000),target);
+        return reference;
+      }
+      const sent=checkedMessage(await request('sendMessage',payload),target);
+      return {id:String(sent.message_id),conversationId:target};
+    },
     async sendProgress({message,text,format,reference,final=false,authorize}) {
       const target=binding(message);
       if(!final&&telegramHTML(text).plain.length>3900)text=clipText(text,3000)+'\n…（完整回答将在完成后发送 / full answer follows）';

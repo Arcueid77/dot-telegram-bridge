@@ -116,3 +116,9 @@ node --env-file=/etc/dot-bridge/telegram/telegram.env scripts/run-live.js --conf
 Telegram 使用官方 mention 实体或对本 bot 的回复识别触发，并保留论坛话题。关键词／全消息模式需要管理员核对 BotFather 的群隐私配置及实际可见消息；调整前确认接收范围。Markdown 会转为安全 HTML。
 
 配置字段的范围与私有文件要求见[统一交互说明](https://github.com/Arcueid77/dot-bridge/blob/main/docs/new-channels.md#统一交互与群聊规则)。
+
+## 选项、文件和提醒管理
+
+支持原生选项回复，点击后作为一条新输入交给原 dot。选项绑定发起人、原会话及实际发出的消息，最长十分钟有效。生成的图片、音频或文件可由具备程序文件读取能力的原 dot 分块上传，经大小与 SHA-256 校验后作为原消息的最终回复。单文件上限 5 MiB，仍需满足本渠道支持的媒体类型与格式。
+
+固定文字提醒支持工作日、固定间隔、暂停、恢复和发送历史。先核对 `check_telegram_outbound` 的开关，再按提醒编号与当前版本操作。暂停期间的旧时间点在恢复时跳过。
