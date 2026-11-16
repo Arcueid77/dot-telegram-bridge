@@ -23,7 +23,7 @@ async function fixture(t, options = {}) {
     if (method === 'getWebhookInfo') return apiResponse({url:''});
     if (method === 'getUpdates') { if (polled) return suspended(init.signal); polled = true; return apiResponse([{update_id:1,message:incoming}]); }
     if (method === 'getFile') return apiResponse(options.file ?? {file_id:body.file_id,file_path:'photos/file_12.jpg',file_size:4});
-    if (['sendPhoto', 'sendVoice', 'sendDocument'].includes(method)) return options.send ? options.send(method, body, init) : apiResponse({message_id:99,chat:{id:123}});
+    if (['sendPhoto', 'sendVoice', 'sendDocument', 'sendVideo', 'sendSticker'].includes(method)) return options.send ? options.send(method, body, init) : apiResponse({message_id:99,chat:{id:123}});
     throw new Error('Unexpected synthetic endpoint');
   };
   const provider = createProvider({credentials, state:{get:key=>values.get(key),set:(key,value)=>values.set(key,value)}, onMessage:async message=>seen.push(message), fetch});
@@ -49,7 +49,7 @@ test('long Unicode answers upload one document with the full content instead of 
 
 test('declares only implemented media types and reads matching private file references', async t => {
   const fx = await fixture(t);
-  assert.deepEqual(channel.media,{read:['image','audio','file'],reply:['image','audio','file']});
+  assert.deepEqual(channel.media,{read:['image','audio','file','video','sticker'],reply:['image','audio','file','video','sticker']});
   assert.equal(channel.maxMediaReplyText,1024);
   assert.deepEqual(fx.message.attachments.map(a=>a.kind),['audio','file','image']);
   assert.equal(JSON.stringify(fx.message.attachments).includes('file_id'),false);
@@ -136,4 +136,23 @@ test('revoked authorization blocks media and text before their final provider re
   await assert.rejects(fx.provider.sendMediaReply({message:fx.message,media:{type:'file',mimeType:'application/pdf',name:'a.pdf',data:Buffer.from('A')},authorize}),/revoked/);
   await assert.rejects(fx.provider.sendReply({message:fx.message,text:'A reply',authorize}),/revoked/);
   assert.equal(fx.calls.length,before);
+});
+
+
+test('Telegram video and native stickers retain source references and use the matching API once',async t=>{
+  const incoming={message_id:1,from:{id:123,is_bot:false},chat:{id:123,type:'private'},video:{file_id:'video-file',mime_type:'video/mp4',file_size:4},sticker:{file_id:'sticker-file',is_video:true,file_size:4}};
+  const fx=await fixture(t,{message:incoming});
+  assert.deepEqual(fx.message.attachments.map(item=>item.kind),['video','sticker']);
+  assert.equal((await fx.provider.readAttachment({message:fx.message,attachmentIndex:0})).mimeType,'video/mp4');
+  assert.equal((await fx.provider.readAttachment({message:fx.message,attachmentIndex:1})).mimeType,'video/webm');
+  for(const [type,mimeType,method] of [['video','video/mp4','sendVideo'],['sticker','video/webm','sendSticker']]){
+    await fx.provider.sendMediaReply({message:fx.message,media:{type,mimeType,name:'fixture.webm',data:Buffer.from('DATA')}});
+    const call=fx.calls.at(-1);assert.ok(call.url.endsWith('/'+method));
+    assert.equal(call.init.body.get('chat_id'),'123');
+    assert.equal(JSON.parse(call.init.body.get('reply_parameters')).message_id,1);
+    assert.equal(await call.init.body.get(type).text(),'DATA');
+  }
+  const count=fx.calls.length;
+  await assert.rejects(fx.provider.sendMediaReply({message:fx.message,media:{type:'sticker',mimeType:'video/webm',name:'a.webm',data:Buffer.from('DATA')},text:'unsupported caption'}));
+  assert.equal(fx.calls.length,count);
 });

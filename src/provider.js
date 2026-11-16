@@ -11,10 +11,12 @@ const fileId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,1024}$/.t
 const mime = value => typeof value === 'string' && /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(value) && value.length <= 127;
 
 function validateMediaReply({media, text = ''} = {}) {
-  if (!media || !['image', 'audio', 'file'].includes(media.type) || !Buffer.isBuffer(media.data) || media.data.length < 1 || media.data.length > MAX_MEDIA) throw new Error('Telegram media must contain 1 byte to 5 MiB.');
+  if (!media || !['image', 'audio', 'file', 'video', 'sticker'].includes(media.type) || !Buffer.isBuffer(media.data) || media.data.length < 1 || media.data.length > MAX_MEDIA) throw new Error('Telegram media must contain 1 byte to 5 MiB.');
   if (!mime(media.mimeType) || typeof media.name !== 'string' || !media.name || media.name.length > 255 || /[\u0000-\u001f\u007f/\\]|\p{Surrogate}/u.test(media.name) || ['.', '..'].includes(media.name)) throw new Error('Telegram media name or MIME type is invalid.');
   if (media.type === 'image' && !['image/jpeg', 'image/png'].includes(media.mimeType)) throw new Error('Telegram image replies require JPEG or PNG; send other formats as a file.');
   if (media.type === 'audio' && !['audio/ogg', 'audio/mpeg', 'audio/mp4'].includes(media.mimeType)) throw new Error('Telegram voice replies require OGG/Opus, MP3 or M4A; send other formats as a file.');
+  if (media.type === 'video' && media.mimeType !== 'video/mp4') throw new Error('Telegram video replies require MP4.');
+  if (media.type === 'sticker' && (!['image/webp','video/webm','application/x-tgsticker'].includes(media.mimeType) || text !== '')) throw new Error('Telegram stickers require WEBP, WEBM or TGS with an empty caption.');
   if (typeof text !== 'string' || text.length > 1024 || /\p{Surrogate}|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text)) throw new Error('Telegram media caption must contain at most 1024 characters.');
 }
 
@@ -65,10 +67,13 @@ function metadata(message) {
     // File IDs are stored only inside core's encrypted, private replyContext.
     references.push(fileId(value.file_id) ? {fileId:value.file_id, ...(Number.isSafeInteger(value.file_size) && value.file_size >= 0 ? {size:value.file_size} : {}), ...(defaultMime ? {defaultMime} : {})} : null);
   };
-  for (const [field, kind] of Object.entries({voice:'audio', audio:'audio', video:'video', video_note:'video', animation:'video', document:'file', sticker:'image'})) {
+  for (const [field, declaredKind] of Object.entries({voice:'audio', audio:'audio', video:'video', video_note:'video', animation:'video', document:'file', sticker:'sticker'})) {
     const value = message[field];
     if (!value || typeof value !== 'object') continue;
-    add(value, kind, field === 'voice' ? 'audio/ogg' : undefined);
+    const kind=field==='animation'&&value.mime_type==='image/gif'?'image':declaredKind;
+    const fallback = field === 'voice' ? 'audio/ogg' : field === 'sticker' ? (value.is_animated ? 'application/x-tgsticker' : value.is_video ? 'video/webm' : 'image/webp') : kind === 'video' ? 'video/mp4' : undefined;
+    add(value, kind, fallback);
+    if(field==='sticker'&&!result.at(-1).name)result.at(-1).name='sticker.'+(value.is_animated?'tgs':value.is_video?'webm':'webp');
   }
   if (Array.isArray(message.photo) && message.photo.length) {
     const photos = message.photo.filter(value => value && typeof value === 'object');
@@ -331,7 +336,7 @@ export function createProvider({credentials, interaction, state, onMessage, onCh
       if (!Number.isSafeInteger(attachmentIndex) || attachmentIndex < 0 || attachmentIndex >= (message.attachments?.length ?? 0) || attachmentIndex >= 10) throw new Error('Telegram attachment is unavailable.');
       const ref = message.replyContext.attachments?.[attachmentIndex];
       const item = message.attachments[attachmentIndex];
-      if (!fileId(ref?.fileId) || !['image', 'audio', 'file'].includes(item.kind) || (ref.size !== undefined && (!Number.isSafeInteger(ref.size) || ref.size < 0 || ref.size > MAX_MEDIA))) throw new Error('Telegram attachment is unavailable or exceeds 5 MiB.');
+      if (!fileId(ref?.fileId) || !channel.media.read.includes(item.kind) || (ref.size !== undefined && (!Number.isSafeInteger(ref.size) || ref.size < 0 || ref.size > MAX_MEDIA))) throw new Error('Telegram attachment is unavailable or exceeds 5 MiB.');
       const file = await request('getFile', {file_id:ref.fileId});
       if (file?.file_id !== ref.fileId || (file.file_size !== undefined && (!Number.isSafeInteger(file.file_size) || file.file_size < 0 || file.file_size > MAX_MEDIA))) throw failure();
       const result = await download(file.file_path);
@@ -340,7 +345,7 @@ export function createProvider({credentials, interaction, state, onMessage, onCh
     async sendMediaReply({message, media, text = '', authorize = () => {}}) {
       binding(message);
       validateMediaReply({media, text});
-      const field = {image:'photo', audio:'voice', file:'document'}[media.type];
+      const field = {image:'photo', audio:'voice', file:'document',video:'video',sticker:'sticker'}[media.type];
       const form = new FormData();
       form.set('chat_id', message.conversationId);
       form.set('reply_parameters', JSON.stringify({message_id:message.replyContext.messageId, allow_sending_without_reply:true}));
@@ -349,7 +354,7 @@ export function createProvider({credentials, interaction, state, onMessage, onCh
       form.set(field, new Blob([media.data], {type:media.mimeType}), media.name);
       // No URL uploads and no automatic retry: a failed POST may already have delivered.
       authorize();
-      const sent = await request({image:'sendPhoto', audio:'sendVoice', file:'sendDocument'}[media.type], form, 30000);
+      const sent = await request({image:'sendPhoto', audio:'sendVoice', file:'sendDocument',video:'sendVideo',sticker:'sendSticker'}[media.type], form, 30000);
       if (!Number.isSafeInteger(sent?.message_id) || sent.message_id <= 0 || String(sent.chat?.id) !== message.conversationId) throw failure();
       return {providerMessageId:String(sent.message_id)};
     },
